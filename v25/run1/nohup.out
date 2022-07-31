@@ -1,0 +1,1 @@
+./DSCmd: error while loading shared libraries: libgsl.so.0: wrong ELF class: ELFCLASS64

@@ -1,0 +1,921 @@
+#include "functions.hpp"
+
+int main(){
+  int Nsteps, pre_steps;
+  int iprint;
+  int signal;
+  part_num NP;
+  Dynvec<double> length; //length (L) of the spherocylinders
+  Dynvec<double> diameter; //diameter (D) of the spherocylinders
+  Dynvec<double> mass; //mass of the spherocylinders (const mass dens: if the mass of a sphere is m, that of the spherocyl with the same diameter is m*(1+3L/(2D)) )
+  Dynvec<Matrix<double> > dip; //particle dipoles
+  double B[3]; //external field (B*=B*sqrt(sigma^3/(epsilon*relative_mag_permeability)))
+  double dens; //density
+  double temp; //initial temperature
+  double sr_cut; //short range cutoff (long range uses minimum image convention)
+  int K_max; //max K vectors
+  double alpha; //convergence parameter
+  double Dt; //time interval
+  double bar_w; //histogram bar width
+  double ArLx, ArLy; //aspect ratio of the box (Lx/Lz and Ly/Lz)
+  double Q; //thermostat mass
+  double gamma; //thermostat shear rate 
+  int corrf; // correlation sum frequency
+  int tcfd; // time correlation sampling frequency (diffusion)
+  int tcfv; // time correlation sampling frequency (viscosity)
+  int cl_fr; //frequency of cluster checking
+  double min_s; //interparticle distance defining clusters
+  int mx_tcf = 25; //max. num. of particles per species taken into account for averaging time corr func.
+  //   int blk_size = 1000;
+  //epsilon = 1 (energies normalized by epsilon)
+  
+  r_input(Nsteps, pre_steps, iprint, signal, NP, length, diameter, mass, dip, dens, temp, Dt, 
+	  sr_cut, K_max, alpha, bar_w, ArLx, ArLy, corrf, Q, gamma, tcfd, tcfv, B, cl_fr, min_s);
+  
+  int NC = NP.get_Ncomp();
+  int NS = NP.get_Ncros();
+  int Tpart = NP.get_Tpart();
+  
+// // *******
+//   cout << Nsteps << "\n";
+//   cout << pre_steps << "\n";
+//   cout << signal << "\n";
+//   cout << NP.get_Ncomp() << "\n";
+//   for(int i = 0; i < NC; ++i)
+//     cout << NP.get_Npart(i) << " ";
+//   cout << "\n";
+//   for(int i = 0; i < NC; ++i)
+//     cout << length[i] << " ";
+//   cout << "\n";
+//   for(int i = 0; i < NC; ++i)
+//     cout << diameter[i] << " ";
+//   cout << "\n";
+//   for(int i = 0; i < NC; ++i)
+//     cout << mass[i] << " ";
+//   cout << "\n";
+//   for(int i = 0; i < 3; ++i)
+//     cout << B[i] << " ";
+//   cout << "\n";
+//   cout << dens << "\n";
+//   cout << temp << "\n";
+//   cout << Q << "\n";
+//   cout << gamma << "\n";
+//   cout << ArLx << " " << ArLy << "\n";
+//   cout << Dt << "\n";
+//   cout << sr_cut << "\n";
+//   cout << K_max << "\n";
+//   cout << alpha << "\n";
+//   cout << bar_w << "\n";
+//   cout << corrf << "\n";
+//   cout << tcfd << "\n";
+//   cout << tcfv << "\n";
+//   cout << cl_fr << "\n";
+//   cout << min_s << "\n";
+//   cout << iprint << "\n";
+//   for(int n = 0; n < NC; ++n){
+//     int a, b;
+//     dip[n].get_size(a, b); //cout<<a<<" "<<b;
+//     for(int i = 0; i < a; ++i){
+//       for(int j = 0; j < b; ++j)
+// 	cout << dip[n][i][j] << " ";
+//       cout << "\n";
+//     }
+//     cout << "\n";
+//   }
+//   cout << endl;
+//   cout << NP.get_Ncros() << " " << NP.get_Tpart();
+//   cout << endl;
+// // *******
+  
+  //error
+  ofstream Err("Error.dat");
+  Err.close();
+  
+  //check number of particles
+  for(int n = 0; n < NC; ++n){
+    if(NP.get_Npart(n) < 1){
+      Err.open("Error.dat", ios::app);
+      Err << "No. of particles per species must be >= 1" << endl;
+      Err.close();
+      return 1;
+    }
+  }
+  
+  //check that dipoles are inside the particle
+  for(int n = 0; n < NC; ++n){
+    int a, b;
+    dip[n].get_size(a, b);
+    for(int i = 0; i < a; ++i){
+      if(fabs(dip[n][i][0]) >= (length[n]+diameter[n])/2-0.01){
+	Err.open("Error.dat", ios::app);
+	Err << "dipole "<<i<<" of species " << n << " is ouside the core!" << endl;
+	Err.close();
+	return 1;
+      }
+    }
+  }
+  
+  //init cross (keep track of the correspondance  
+  //component <-> inter energy arrays)
+  cross Vc[NC];
+  if(NC > 1){
+    for(int n = 0; n < NC; ++n){
+      Vc[n].C.set_size(NC-1);
+      Vc[n].P.set_size(NC-1);
+      Vc[n].T.set_size(NC-1);
+    }
+    int cnt = 0;
+    int cct[NC];
+    for(int i = 0; i < NC; ++i)
+      cct[i] = 0;
+    for(int m = 0; m < NC-1; ++m){
+      for(int n = m+1; n < NC; ++n){
+	Vc[m].C[cct[m]] = cnt;
+	Vc[m].P[cct[m]] = n;
+	Vc[m].T[cct[m]] = true;
+	cct[m]++;
+	Vc[n].C[cct[n]] = cnt;
+	Vc[n].P[cct[n]] = m;
+	Vc[n].T[cct[n]] = false;
+	cct[n]++;
+	cnt++;
+      }
+    }
+  }
+  
+  //Num. of particles taken into account for computing time correlations
+  Dynvec<int> np_tc;
+  NP.get_Npart(np_tc);
+  for(int i = 0; i < NC; ++i){
+    if(np_tc[i] > mx_tcf) np_tc[i] = mx_tcf;
+  }
+  
+  //find largest particle dimension
+  double dmax = 0, dmin = 1.e+6;
+  for(int n = 0; n < NC; ++n){
+    dmax = max(dmax, length[n]+diameter[n]);
+    dmin = min(dmin, diameter[n]);
+  }
+  
+  //initialize particles
+  Dynvec<Dynvec<Spherocyl> > part(NC);
+  for(int n = 0; n < NC; ++n)
+    part[n].set_size(NP.get_Npart(n));
+ 
+  int Nsum = 0;
+  for(int n = 0; n < NC; ++n){
+    double sh[2] = {length[n], diameter[n]};
+    int NN = NP.get_Npart(n);
+    for(int i = 0; i < NN; ++i){
+      part[n][i].set_id(Nsum+i);
+      part[n][i].set_shape(sh);
+      part[n][i].set_mass(mass[n]);
+      part[n][i].set_inertia();
+      part[n][i].set_dip(dip[n]);  
+    }
+    Nsum += NN;
+  }
+  
+  //initialize thermostats
+  Thermostat thermo[2]; //0. is for translation and 1. is for rotation
+  thermo[0].set_mass(Q);
+  thermo[0].set_shr(gamma);
+  thermo[0].set_seed(1/*time(NULL)*/);
+  thermo[1].set_mass(Q);
+  thermo[1].set_shr(gamma);
+  thermo[1].set_seed(2/*time(NULL)*/);
+    
+  //histograms
+  double cor_cont = 0;
+  int n_bars = 0;
+  Dynvec<Matrix<double> > Hista(NC);
+  Dynvec<Matrix<double> > Histe;
+  if(NC > 1)
+    Histe.set_size(NS);
+  
+  //initialize global average counters
+  long cont = 0;
+  double Time = 0.;
+  accumulator AcT;
+  accumulator AcTsq;
+  int Ntcf = 0; //number of time correlation files
+  int Ntcv = 0; //size of pres. t. correlation file
+  int mcont = 0; //size of magnetic moment correlation file
+  long Npart_in_clust[2] = {0, 0}; //for computin degree of polymerization
+  
+  //box dimmensions
+  double L[3], Lmin=0;
+  
+  //initialize random num. gen.
+  gsl_rng* ran = gsl_rng_alloc(gsl_rng_mt19937); //mersenne twister rng
+  long seed = 1;//time(NULL);
+  gsl_rng_set(ran, seed);
+  
+  //begin or continue run
+  int sz = 4;
+  if(signal == 0){                                     // cout<<"sig 0"<<endl;
+    L[2] = pow(static_cast<double>(NP.get_Tpart()) / (ArLx*ArLy*dens), 1./3);
+    L[1] = ArLy * L[2];
+    L[0] = ArLx * L[2];
+    Lmin = min(L[2], min(L[1], L[0]));
+    //initial positions
+    Err.open("Error.dat", ios::app);
+    Err << "generating positions..." << endl;
+    Err.close();
+    ini_pos(part, L, NP);
+    Err.open("Error.dat", ios::app);
+    Err << "positions generated." << endl;
+    Err.close();
+    for(int i = 0; i < 1000; ++i)
+      GCAmix(part, NP, L, ran);
+    for(int n = 0; n < NC; ++n){
+      int NN = NP.get_Npart(n);
+      for(int i = 0; i < NN; ++i)
+	part[n][i].set_dip(dip[n]);
+    }
+    //initial velocities
+    Err.open("Error.dat", ios::app);
+    Err << "generating velocities..." << endl;
+    Err.close();
+    ini_mom(part, NP, temp, ran);
+    Err.open("Error.dat", ios::app);
+    Err << "velocities generated." << endl;
+    Err.close();
+    //print configuration
+    if(! print_conf(part, thermo, NP, L, true)){
+      Err.open("Error.dat", ios::app);
+      Err << "problem opening conf.dat" << endl;
+      Err.close();
+      gsl_rng_free(ran);
+      return 1;
+    }
+    n_bars = static_cast<int>(floor(sqrt(3.) * Lmin / (2. * bar_w)));
+    //allocate histograms
+    for(int i = 0; i < NC; ++i){
+      Hista[i].set_size(sz, n_bars);
+      Hista[i].set_to(0.);
+    }
+    int cnt = 0;
+    for(int m = 0; m < NC-1; ++m){
+      for(int n = m+1; n < NC; ++n){ 
+	Histe[cnt].set_size(sz, n_bars);
+	Histe[cnt].set_to(0.);
+	  cnt++;
+      }
+    }
+  }else if(signal == 1){                                  //    cout<<"sig 1"<<endl;
+    //charge configuration
+    if(! chrg_conf(part, thermo, NP, L)){
+      Err.open("Error.dat", ios::app);
+      Err << "problem opening conf.dat for reading\n";
+      Err.close();
+      gsl_rng_free(ran);
+      return 1;
+    }
+    for(int n = 0; n < NC; ++n){
+      int NN = NP.get_Npart(n);
+      for(int i = 0; i < NN; ++i){
+	part[n][i].set_mass(mass[n]);
+	part[n][i].set_inertia();
+	part[n][i].set_dip(dip[n]);
+      }
+    }
+    Lmin = min(L[2], min(L[1], L[0]));
+    n_bars = static_cast<int>(floor(sqrt(3.) * Lmin / (2. * bar_w))); 
+    //allocate histograms
+    for(int i = 0; i < NC; ++i){
+      Hista[i].set_size(sz, n_bars);
+      Hista[i].set_to(0.);
+    }
+    int cnt = 0;
+    for(int m = 0; m < NC-1; ++m){
+      for(int n = m+1; n < NC; ++n){ 
+	Histe[cnt].set_size(sz, n_bars);
+	Histe[cnt].set_to(0.);
+	  cnt++;
+      }
+    }
+  }else if(signal == 2){                                 //     cout<<"sig 2"<<endl;
+    //charge counters
+    if(! chrg_cont(Time, cont, Ntcf, Ntcv, mcont, AcT, AcTsq, Npart_in_clust)){
+      Err.open("Error.dat", ios::app);
+      Err << "problem opening counters.dat for reading\n";
+      Err.close();
+      gsl_rng_free(ran);
+      return 1;
+    }
+    //charge configuration
+    if(! chrg_conf(part, thermo, NP, L)){
+      Err.open("Error.dat", ios::app);
+      Err << "problem opening conf.dat for reading\n";
+      Err.close();
+      gsl_rng_free(ran);
+      return 1;
+    }
+    for(int n = 0; n < NC; ++n){
+      int NN = NP.get_Npart(n);
+      for(int i = 0; i < NN; ++i){
+	part[n][i].set_mass(mass[n]);
+	part[n][i].set_inertia();
+	part[n][i].set_dip(dip[n]);  
+      }
+    }
+    Lmin = min(L[2], min(L[1], L[0]));
+    n_bars = static_cast<int>(floor(sqrt(3.) * Lmin / (2. * bar_w)));
+    //allocate histograms
+    for(int i = 0; i < NC; ++i){
+      Hista[i].set_size(sz, n_bars);
+      Hista[i].set_to(0.);
+    }
+    int cnt = 0;
+    for(int m = 0; m < NC-1; ++m){
+      for(int n = m+1; n < NC; ++n){ 
+	Histe[cnt].set_size(sz, n_bars);
+	Histe[cnt].set_to(0.);
+	  cnt++;
+      }
+    }
+    //charge correlations
+    if(! chrg_correl(cor_cont, Hista, Histe, NP)){
+      Err.open("Error.dat", ios::app);
+      Err << "problem opening correlation.dat for reading\n";
+      Err << "starting correlation.dat from scratch!\n";
+      Err.close();
+      cor_cont = 0;
+//       gsl_rng_free(ran);
+//       return 1;
+    }
+  }else{
+    Err.open("Error.dat", ios::app);
+    Err << "signal must be 0, 1 or 2!\n";
+    Err.close();
+    gsl_rng_free(ran);
+    return 1;
+  }
+  
+  
+  //check that the total linear momentum is zero!
+  double pm[3], ptot[3] = {0,0,0};
+  for(int n = 0; n < NC; ++n){
+    int NN = NP.get_Npart(n);
+    for(int i = 0; i < NN; ++i){
+      part[n][i].get_mom(pm);
+      for(int k = 0; k < 3; ++k)
+	ptot[k] += pm[k];
+    }
+  }
+  if(ptot[0] > 1e-8 || ptot[2] > 1e-8 || ptot[2] > 1e-8){
+    Err.open("Error.dat", ios::app);
+    Err << "Total momentum is not zero! : "
+	<<ptot[0]<<" , "<<ptot[1]<<" , "<<ptot[2]<<endl;
+    Err.close();
+    gsl_rng_free(ran);
+    return 1;
+  }
+  
+//   //
+//   double KK = 0; double pm[3], ine[3];
+//   for(int n = 0; n < NC; ++n){
+//     int NN = NP.get_Npart(n);
+//     for(int i = 0; i < NN; ++i){
+//       part[n][i].get_mom(pm);
+//       double psq = pm[0]*pm[0]+pm[1]*pm[1]+pm[2]*pm[2];
+//       KK += psq / part[n][i].get_mass();
+//       //transform I to box frame
+//       part[n][i].get_inertia(ine);
+//       Matrix<double> o(3,3); part[n][i].get_omat(o);
+//       Matrix<double> I0(3,3,0.); 
+//       I0[0][0] = 1./ine[0]; I0[1][1] = 1./ine[1]; I0[2][2] = 1./ine[2];
+//       Matrix<double> Ib(3,3,0.);
+//       Ib = transpose(o) * I0 * o;
+//       Matrix<double> ll(3,1); part[n][i].get_angm(pm);
+//       for(int a = 0; a < 3; ++a)
+// 	ll[a][0] = pm[a];
+//       Matrix<double> lsq(1,1);
+//       lsq = transpose(ll) * Ib * ll;
+//       KK += lsq[0][0];
+//     }
+//   }
+//   KK /= (2*Tpart); cout<<"temp: "<<KK/3<<endl;
+//   //
+  
+  double V = L[0] * L[1] * L[2];
+  
+  //cutoff
+  if(sr_cut == 0)
+    sr_cut = Lmin / 2 - dmin;
+  if(sr_cut > Lmin / 2){
+    Err.open("Error.dat", ios::app);
+    Err << "sr_cut must be less than L/2-dmax: " << Lmin/2-dmin << endl;
+    Err.close();
+    gsl_rng_free(ran);
+    return 1;
+  }else if(sr_cut < dmax+0.5){
+    Err.open("Error.dat", ios::app);
+    Err << "sr_cut must be >= the largest dimension  + 0.5."
+	<< "and " << sr_cut << " < " << dmax+0.5 << endl;
+    Err.close();
+    gsl_rng_free(ran);
+    return 1;
+  }   
+  
+  //tables
+  if(Lmin > 200){
+    Err.open("Error.dat", ios::app);
+    Err << "Tab is not large enough. Lmin=" << Lmin << " > 200\n";
+    Err.close();
+    gsl_rng_free(ran);
+    return 1;
+  }
+  double Tab[32768][3];
+  for(int i = 0; i < 32768; ++i){
+    Tab[i][0] = 0.; Tab[i][1] = 0.; Tab[i][2] = 0.;
+  }
+  tabul(Tab, alpha);
+  
+  Dynvec<Matrix<double> > Kvec;
+  Kvec.set_size(K_max+1);
+  for(int i = 0; i < K_max+1; ++i){
+    Kvec[i].set_size(K_max+1, K_max+1);
+    Kvec[i].set_to(0.);
+  }
+  wave_v(Kvec, L, alpha, K_max);
+  
+//   //partial counters
+//   long scont = 0;
+//   accumulator Ac;
+  
+  //TD quantities
+  accumulator var;
+  double K=0, U=0, P=0; //kinetic energy, potential energy and Pressure
+  double Uss=0, Wss=0, Pss=0; //soft sphere contributions
+  double UdipR=0, PdipR=0; //real sum dipole contributions
+  double UdipK=0, PdipK=0; //reciprocal sum dipole contributions
+  double Uext=0; //external field energy (no pressure term because B is constant and produces just a torque, no net force)
+  double PT[3][3]; //total pressure tensor
+  double PTss[3][3]; //pressure tensor short range
+  double PTdipR[3][3]; //dip real part pressure tensor
+  double PTdipK[3][3]; //dip recip part pressure tensor
+  double PTkin[3][3]; //kinetic part of pressure tensor 
+  
+   //radius for determining neighbor list skin crossing
+  double r_list_min = sr_cut + 0.1*dmin;
+  if(r_list_min < 1.5*dmax) r_list_min = 1.5*dmax;
+  double r_list_max = r_list_min + 0.9*dmin;
+  
+  //Initialize neighbor list//
+  deque<int> nblist[Tpart];
+  neigh_list(part, NP, L, nblist, r_list_max);
+  if(! savec_list(part, NP)){
+    Err.open("Error.dat", ios::app);
+    Err << "problem opening compConf.dat." << endl;
+    Err.close();
+    gsl_rng_free(ran);
+    return 1;
+  }
+  
+  //initial force
+  double zero[3] = {0., 0., 0.};
+  for(int n = 0; n < NP.get_Ncomp(); ++n){
+    int NN = NP.get_Npart(n);
+    for(int i = 0; i < NN; ++i){
+      part[n][i].set_F(zero);
+      part[n][i].set_T(zero);
+    }
+  }
+  if(! force_sc(part, NP, L, sr_cut, Uss, Wss, PTss, nblist)){
+    Err.open("Error.dat", ios::app);
+    Err << "initial overlap!\n";
+    Err.close();
+    gsl_rng_free(ran);
+    return 1;
+  }
+  force_dipR(part, NP, L, Tab, UdipR, PTdipR);
+  force_dipK(part, NP, L, K_max, alpha, Kvec, UdipK, PTdipK);                 /*cout<<UdipK<<endl;*/
+  ext_field(part, NP, B, Uext);
+  //compute self energy
+  double Uself = self_ener(part, NP);
+  Uself /= Tpart;
+//   double E = 0; //parameter to check the energy
+  
+  
+  
+  //initialize calculation time
+  Timer stepT;
+  double telap=0.; long tcpu=0;
+  Timer force_ssT;
+  double force_ssel=0.; long force_sspu=0;
+  Timer force_dipRT;
+  double force_Rel=0.; long force_Rpu=0;
+  Timer force_dipKT;
+  double force_Kel=0.; long force_Kpu=0;
+  Timer movXT;
+  double movX_el=0.; long movX_pu=0;
+  Timer movPT;
+  double movP_el=0.; long movP_pu=0;
+  Timer corT;
+  double cor_el=0.; long cor_pu=0;
+  
+  //Begin step loop***************************************************************************
+  for(int step = 0; step < pre_steps+Nsteps; ++step){
+    
+    if((step == pre_steps) && (signal == 0 || signal == 1)) //Time counts the averaging time from here on
+      Time = 0.;
+    if(Time == 0.){
+      int ts = system("rm -f ptens.dat");
+      ts = system("rm -f magmom.dat");
+    }
+    
+//     cout<<Time<<endl;
+    
+//     if(step >= pre_steps){
+//       if(fmod(static_cast<float>(step), static_cast<float>(blk_size)) == 0){
+// 	scont = 0;
+// 	Ac.set_zero();
+//       }
+//     }
+      
+//     if(fmod(static_cast<double>(step), iprint) == 0){
+//       //write configuration//
+//       if(! print_conf(part, thermo, NP, L, false)){
+// 	Err.open("Error.dat", ios::app);
+// 	Err << "problem opening conf.dat\n"; 
+// 	Err.close();
+//gsl_rng_free(ran);
+// 	return 1;
+//       }
+//       //print counters//
+//       if(! save_cont(Time, cont, Ntcf, AcT, AcTsq, false)){
+// 	Err.open("Error.dat", ios::app);
+// 	Err << "problem opening counters.dat\n";
+// 	Err.close();
+//gsl_rng_free(ran);
+// 	return 1;
+//       }
+//     }
+    
+    //LEAPFROG VERLET**************************************************
+    
+        //renormalize basis
+    if(fmod(static_cast<float>(step), static_cast<float>(100)) == 0){
+      for(int n = 0; n < NP.get_Ncomp(); ++n){
+	int NN = NP.get_Npart(n);
+	for(int i = 0; i < NN; ++i)
+	  part[n][i].renorm();
+      }
+    }
+      
+    double Ktr[2] = {0., 0.};
+    //thermostat first step
+    moveTher(thermo, temp, Dt, Ktr, Tpart, 0);
+    //find intermediate velocities
+    moveP(part, thermo, NP, Dt, Ktr, PTkin, false);
+    //thermostat second step
+    moveTher(thermo, temp, Dt, Ktr, Tpart, 1);
+    //find new positions
+    movXT.start();
+    moveX(part, NP, Dt);
+    movXT.stop(telap, tcpu);
+    movX_el += telap; movX_pu += tcpu;
+    
+    //calculate new forces
+    for(int n = 0; n < NP.get_Ncomp(); ++n){
+      int NN = NP.get_Npart(n);
+      for(int i = 0; i < NN; ++i){          
+	part[n][i].set_F(zero);
+	part[n][i].set_T(zero);
+      }
+    }
+    force_ssT.start();
+    Uss = Wss = 0.;
+    if(! force_sc(part, NP, L, sr_cut, Uss, Wss, PTss, nblist)){
+      Err.open("Error.dat", ios::app);
+      Err << "overlap!\n";
+      Err.close();
+      print_conf(part, thermo, NP, L, false);
+      gsl_rng_free(ran);
+      return 1;
+    }
+    force_ssT.stop(telap, tcpu);
+    force_ssel += telap; force_sspu += tcpu;
+    
+    force_dipRT.start();
+    UdipR = 0.;
+    force_dipR(part, NP, L, Tab, UdipR, PTdipR);
+    force_dipRT.stop(telap, tcpu);
+    force_Rel += telap; force_Rpu += tcpu;
+    
+    force_dipKT.start();
+    UdipK = 0.;
+    force_dipK(part, NP, L, K_max, alpha, Kvec, UdipK, PTdipK);
+    force_dipKT.stop(telap, tcpu);
+    force_Kel += telap; force_Kpu += tcpu;
+        
+    ext_field(part, NP, B, Uext);
+    
+    //find new velocity
+    movPT.start();
+    moveP(part, thermo, NP, Dt, Ktr, PTkin, true);
+    movPT.stop(telap, tcpu);
+    movP_el += telap; movP_pu += tcpu;
+    //thermostat third step
+    moveTher(thermo, temp, Dt, Ktr, Tpart, 2);
+    
+    //*******************************************************************
+    
+    double WdipR = 3 * UdipR; double WdipK = 3 * UdipK;
+    K = (Ktr[0] + Ktr[1]) / Tpart;
+    Uss /= Tpart; UdipR /= Tpart; UdipK /= Tpart; Uext /= Tpart;
+    U = Uself + Uss + UdipR + UdipK + Uext; /*cout<<UdipR<<" "<<UdipK<<endl; */
+    Pss = Wss / (3 * V); PdipR = WdipR / (3 * V); PdipK = WdipK / (3 * V); 
+    double ctemp = K / 3;
+    P = ctemp * dens + Pss + PdipR + PdipK;
+    for(int a = 0; a < 3; ++a){
+      for(int b = 0; b < 3; ++b){
+	PTkin[a][b] /= V;
+	PTss[a][b] /= V; PTdipR[a][b] /= V; PTdipK[a][b] /= V;
+	PT[a][b] = PTkin[a][b] + PTss[a][b] + PTdipR[a][b] + PTdipK[a][b];
+      }
+    }
+    var.set_K(K); var.set_U(U); var.set_P(P);
+    var.set_Uss(Uss); var.set_Pss(Pss); 
+    var.set_UdipR(UdipR); var.set_PdipR(PdipR);
+    var.set_UdipK(UdipK); var.set_PdipK(PdipK);               /*cout<<var.get_UdipK()<<endl; */
+    var.set_Uext(Uext);
+    var.set_PT(PT);
+    var.set_PTss(PTss); var.set_PTdipR(PTdipR); var.set_PTdipK(PTdipK);
+    var.set_PTkin(PTkin);
+    
+    Time += Dt; 
+    
+//     //check for energy conservation
+//     if(step > 0){
+//       if(fabs(E-U-K) > 1.e-8){
+// // 	//stepT.stop(telap, tcpu);
+// // 	if(! print_out(Time, var, telap, tcpu, iprint)){
+// // 	  Err.open("Error.dat", ios::app);
+// // 	  Err << "problem opening output.dat\n"; 
+// // 	  Err.close();
+   //// gsl_rng_free(ran);
+// // 	  return 1;
+// // 	}
+// // 	if(! print_conf(part, NP, L)){
+// // 	  Err.open("Error.dat", ios::app);
+// // 	  Err << "problem opening conf.dat\n"; 
+// // 	  Err.close();
+    ////gsl_rng_free(ran);
+// // 	  return 1;
+// // 	}
+// 	Err.open("Error.dat", ios::app);
+// 	Err << "energy difference! DE= " << fabs(E-U-K) << endl;
+// 	Err.close();
+    ////gsl_rng_free(ran);
+// // 	return 1;
+//       }
+//     }else
+//       E = K + U; //initial energy value
+      
+    //check for neighbor list updating and update//
+    bool udate;
+    if(! check_list(part, NP, L, r_list_min, r_list_max, udate)){
+      Err.open("Error.dat", ios::app);
+      Err << "problem opening compConf.dat." << endl;
+      Err.close();
+      gsl_rng_free(ran);
+      return 1;
+    }
+    if(udate){
+//       //
+//       ofstream Err("Error.dat", ios::app);
+//       Err<<"step "<<step<<". Updating list...\n";
+//       Err.close();
+//       //
+      neigh_list(part, NP, L, nblist, r_list_max);
+      if(! savec_list(part, NP)){
+	Err.open("Error.dat", ios::app);
+	Err << "problem opening compConf.dat." << endl;
+	Err.close();
+	gsl_rng_free(ran);
+	return 1;
+      }
+    }
+     
+    //cluster
+    if(fmod(static_cast<double>(step), cl_fr) == 0){
+      bool p_check = false;
+//       if(step >= pre_steps) p_check = true;
+      clust_conf(part, NP, L, min_s, dmax, ran, Npart_in_clust, p_check);
+    }
+     
+    if(step >= pre_steps){
+      //accumulate histograms
+      if(fmod(static_cast<float>(step), corrf) == 0){
+	corT.start();
+	acc_correl(part, Hista, Histe, L, bar_w, NP, Vc);
+	cor_cont += 1. / V;
+	corT.stop(telap, tcpu);
+	cor_el += telap;
+	cor_pu += tcpu;
+      }
+      
+      //orientational order parameters
+      double G1, G2;
+      double M[3] = {0., 0., 0.}; // total magnetic moment
+      oo_params(part, NP, G1, G2, M);
+      var.set_G1(G1);
+      var.set_G2(G2);
+      
+      //print files for time correlation functions
+      if(fmod(static_cast<float>(step), tcfd) == 0){
+	if(! pos_vel(part, np_tc, Dt*tcfd, Ntcf)){
+	  Err.open("Error.dat", ios::app);
+	  Err << "problem opening pos_vel_"<< Ntcf <<".dat." << endl;
+	  Err.close();
+	}
+	Ntcf++;
+      }
+      if(fmod(static_cast<float>(step), tcfv) == 0){
+	if(! print_ptens(part, NP, Time, PT)){
+	  Err.open("Error.dat", ios::app);
+	  Err << "problem opening ptens.dat." << endl;
+	  Err.close();
+	}
+	Ntcv++;
+	if(! print_magmom(Time, M)){
+	  Err.open("Error.dat", ios::app);
+	  Err << "problem opening magmom.dat." << endl;
+	  Err.close();
+	}
+	mcont++;
+      }
+      
+//       //accumulate counters
+//       Ac += var;
+//       scont++;
+
+      //acumulate global counters
+//       if(fmod(static_cast<float>(step+1), static_cast<float>(blk_size)) == 0){
+// 	accumulator Acv = Ac / scont;
+	AcT += var;//Acv;
+	AcTsq += var * var;//(Acv * Acv);
+	cont++;
+//       }
+    }
+     
+    if(fmod(static_cast<double>(step), iprint) == 0){
+      //write configuration//
+      if(! print_conf(part, thermo, NP, L, true)){
+	Err.open("Error.dat", ios::app);
+	Err << "problem opening conf.dat\n"; 
+	Err.close();
+	gsl_rng_free(ran);
+	return 1;
+      }
+      //print counters//
+      if(! save_cont(Time, cont, Ntcf, Ntcv, mcont, AcT, AcTsq, Npart_in_clust)){
+	Err.open("Error.dat", ios::app);
+	Err << "problem opening counters.dat\n";
+	Err.close();
+      }
+      //normalize and print correlations//
+      if((step >= pre_steps) && (fmod(static_cast<float>(step), corrf) == 0)){
+	if(! nor_correl(Hista, Histe, Lmin, bar_w, NP, cor_cont)){
+	  Err.open("Error.dat", ios::app);
+	  Err << "problem opening correlation.dat" << endl;
+	  Err.close();
+	  gsl_rng_free(ran);
+	  return 1;
+	}
+      }
+      //compute total momentum
+      double pt[3];
+      double Mom[6] = {0., 0., 0., 0., 0., 0.};
+      for(int n = 0; n < NC; ++n){
+	int NN = NP.get_Npart(n);
+	for(int i = 0; i < NN; ++i){
+	  part[n][i].get_mom(pt);
+	  for(int j = 0; j < 3; ++j)
+	    Mom[j] += pt[j];
+	  part[n][i].get_angm(pt);
+	  for(int j = 0; j < 3; ++j)
+	    Mom[j+3] += pt[j];
+	}
+      }
+      //print output//
+      stepT.stop(telap, tcpu);
+      if(! print_out(Time, var, telap, tcpu, iprint, Mom)){
+	Err.open("Error.dat", ios::app);
+	Err << "problem opening output.dat\n"; 
+	Err.close();
+	gsl_rng_free(ran);
+	return 1;
+      }
+      stepT.start();
+    }
+    
+  }
+  //End step loop*****************************************************************************
+  
+  //free rng
+  gsl_rng_free(ran);
+  
+  //
+  ofstream Tfile("time.dat");
+  Tfile << "X move time. elap: " << (movX_el/(pre_steps+Nsteps))*1e-6 
+	<< " cpu: " << (static_cast<double>(movX_pu)/(pre_steps+Nsteps))*1e-6  << endl;
+  Tfile << "Force_ss time. elap: " << (force_ssel/(pre_steps+Nsteps))*1e-6 
+	<< " cpu: " << (static_cast<double>(force_sspu)/(pre_steps+Nsteps))*1e-6  << endl;
+  Tfile << "Force_dipR time. elap: " << (force_Rel/(pre_steps+Nsteps))*1e-6 
+	<< " cpu: " << (static_cast<double>(force_Rpu)/(pre_steps+Nsteps))*1e-6  << endl;
+  Tfile << "Force_dipK time. elap: " << (force_Kel/(pre_steps+Nsteps))*1e-6 
+	<< " cpu: " << (static_cast<double>(force_Kpu)/(pre_steps+Nsteps))*1e-6  << endl;
+  Tfile << "P move time. elap: " << (movP_el/(pre_steps+Nsteps))*1e-6 
+	<< " cpu: " << (static_cast<double>(movP_pu)/(pre_steps+Nsteps))*1e-6  << endl;
+  Tfile << "correl. time. elap: " << (cor_el/(V*cor_cont))*1e-6 
+	<< " cpu: " << (static_cast<double>(cor_pu)/(V*cor_cont))*1e-6  << endl;
+  Tfile.close();
+  //
+  
+  //calculate total averages and fluctuations
+  double avK = AcT.get_K() / cont;
+  double flK = sqrt(AcTsq.get_K() / cont - avK * avK);
+  double avU = AcT.get_U() / cont;
+  double flU = sqrt(AcTsq.get_U() / cont - avU * avU);
+  double avP = AcT.get_P() / cont;
+  double flP = sqrt(AcTsq.get_P() / cont - avP * avP);
+  double avUss = AcT.get_Uss() / cont;
+  double flUss = sqrt(AcTsq.get_Uss() / cont - avUss * avUss);
+  double avPss = AcT.get_Pss() / cont;
+  double flPss = sqrt(AcTsq.get_Pss() / cont - avPss * avPss);
+  double avUdipR = AcT.get_UdipR() / cont;
+  double flUdipR = sqrt(AcTsq.get_UdipR() / cont - avUdipR * avUdipR);
+  double avPdipR = AcT.get_PdipR() / cont;
+  double flPdipR = sqrt(AcTsq.get_PdipR() / cont - avPdipR * avPdipR);
+  double avUdipK = AcT.get_UdipK() / cont;
+  double flUdipK = sqrt(AcTsq.get_UdipK() / cont - avUdipK * avUdipK);
+  double avPdipK = AcT.get_PdipK() / cont;
+  double flPdipK = sqrt(AcTsq.get_PdipK() / cont - avPdipK * avPdipK);
+  double avUext = AcT.get_Uext() / cont;
+  double flUext = sqrt(AcTsq.get_Uext() / cont - avUext * avUext);
+  double Ptm[3][3], Ptmsq[3][3];
+  double avPT[3][3], flPT[3][3];
+  AcT.get_PT(Ptm); AcTsq.get_PT(Ptmsq);
+  for(int i = 0; i < 3; ++i){
+    for(int j = 0; j < 3; ++j){
+      avPT[i][j] = Ptm[i][j] / cont;
+      flPT[i][j] = sqrt(Ptmsq[i][j] / cont - avPT[i][j] * avPT[i][j]);
+    }
+  }
+  double avPTss[3][3], flPTss[3][3];
+  AcT.get_PTss(Ptm); AcTsq.get_PTss(Ptmsq);
+  for(int i = 0; i < 3; ++i){
+    for(int j = 0; j < 3; ++j){
+      avPTss[i][j] = Ptm[i][j] / cont;
+      flPTss[i][j] = sqrt(Ptmsq[i][j] / cont - avPTss[i][j] * avPTss[i][j]);
+    }
+  }
+  double avPTdipR[3][3], flPTdipR[3][3];
+  AcT.get_PTdipR(Ptm); AcTsq.get_PTdipR(Ptmsq);
+  for(int i = 0; i < 3; ++i){
+    for(int j = 0; j < 3; ++j){
+      avPTdipR[i][j] = Ptm[i][j] / cont;
+      flPTdipR[i][j] = sqrt(Ptmsq[i][j] / cont - avPTdipR[i][j] * avPTdipR[i][j]);
+    }
+  }
+  double avPTdipK[3][3], flPTdipK[3][3];
+  AcT.get_PTdipK(Ptm); AcTsq.get_PTdipK(Ptmsq);
+  for(int i = 0; i < 3; ++i){
+    for(int j = 0; j < 3; ++j){
+      avPTdipK[i][j] = Ptm[i][j] / cont;
+      flPTdipK[i][j] = sqrt(Ptmsq[i][j] / cont - avPTdipK[i][j] * avPTdipK[i][j]);
+    }
+  }
+  double avPTkin[3][3], flPTkin[3][3];
+  AcT.get_PTkin(Ptm); AcTsq.get_PTkin(Ptmsq);
+  for(int i = 0; i < 3; ++i){
+    for(int j = 0; j < 3; ++j){
+      avPTkin[i][j] = Ptm[i][j] / cont;
+      flPTkin[i][j] = sqrt(Ptmsq[i][j] / cont - avPTkin[i][j] * avPTkin[i][j]);
+    }
+  }
+  double avG1 = AcT.get_G1() / cont;
+  double flG1 = sqrt(AcTsq.get_G1() / cont - avG1 * avG1);
+  double avG2 = AcT.get_G2() / cont;
+  double flG2 = sqrt(AcTsq.get_G2() / cont - avG2 * avG2);
+  
+  double pol_deg = static_cast<double>(Npart_in_clust[1]) / (Tpart * Npart_in_clust[0]);
+  
+  if(! print_final(Time, avK, flK, avU, flU, avP, flP, avUss, flUss, avPss, flPss, 
+		   avUdipR, flUdipR, avPdipR, flPdipR, avUdipK, flUdipK, avPdipK, flPdipK,  
+		   avUext, flUext, avPT, flPT, avPTss, flPTss, avPTdipR, flPTdipR, avPTdipK, flPTdipK,
+		   avPTkin, flPTkin, avG1, flG1, avG2, flG2, length, diameter, mass, dip, L, NP, temp, 
+		   Q, gamma, B, pol_deg)){
+    Err.open("Error.dat", ios::app);
+    Err << "problem opening an output file" << endl;
+    Err.close();
+    return 1;
+  }
+  
+  
+  return 0;
+}

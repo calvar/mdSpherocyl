@@ -1,0 +1,6 @@
+X move time. elap: 0.0036947 cpu: 0.0039604
+Force_ss time. elap: 0.00167025 cpu: 0.00168317
+Force_dipR time. elap: 0.0265829 cpu: 0.0261386
+Force_dipK time. elap: 0.0620597 cpu: 0.0621782
+P move time. elap: 0.00144507 cpu: 0.00138614
+correl. time. elap: 0.00998191 cpu: 0.00909091

@@ -1,0 +1,37 @@
+No. of steps=		240001
+Steps before average=	100000
+Signal=			0
+No. of components=	1
+No. of Particles=	200
+Lengths=		1.701
+Diameters=		0.567
+masses=		  	1.
+Ext Mag.Field=          0. 0. 5.
+Density=		1e-4
+Temperature=		1.
+Thermostat"mass"=	1.e+12
+Thermostat"shearRate"=	0.
+Lx, Ly asp.rat. to Lz=  1 1
+Time step size=		5e-4
+Cutoff dist(SRange)=	3.0
+No. of Kvectors=        1
+Convergence param(a)=   0.055
+Histogram bar width=	0.01
+corr. sum freq.=	100
+DiffCorr. frequency=    20
+ViscCorr. frequency=    10
+clustering frequency=   500
+proximity dist.=        0.1
+Printing frequency=	500
+
+dipoles:(No.of.dipoles) 
+(position ; orientation ; dip.moment)
+species1: 1
+0. ; 0 0 1 ; 0.
+species2: 0
+species3: 0
+species4: 0
+species5: 0
+
+
+4.481
